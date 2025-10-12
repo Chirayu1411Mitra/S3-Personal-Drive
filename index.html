@@ -11,7 +11,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     
-    <!-- Configuration -->
+    <!-- Load Configuration from external file -->
     <script src="config.js"></script>
 
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -97,12 +97,8 @@
     </div>
 
     <script>
-        // --- Configuration setup ---
-        let awsConfig;
-        let firebaseConfig;
-        
-        // Configuration will be loaded from config.js (local) or config.vercel.js (Vercel)
-        // Initialize Firebase after config is loaded
+        // The awsConfig and firebaseConfig variables are now loaded from config.js
+        // We can immediately use them to initialize Firebase.
         firebase.initializeApp(firebaseConfig);
         const auth = firebase.auth();
 
@@ -129,8 +125,7 @@
                 document.getElementById('user-info').classList.add('hidden');
                 document.getElementById('file-list').innerHTML = '';
                 currentPath = '';
-                
-                // Reset sign-in button state when user logs out
+                 // Restore sign-in button state when user logs out
                 const btn = document.getElementById('google-signin-btn');
                 btn.disabled = false;
                 btn.innerHTML = `
@@ -171,7 +166,7 @@
 
         // --- S3 Initialization ---
         function initializeS3() {
-            if (!awsConfig.bucketName.startsWith('YOUR_')) {
+            if (awsConfig && !awsConfig.bucketName.startsWith('YOUR_')) {
                 AWS.config.update({
                     region: awsConfig.region,
                     credentials: new AWS.Credentials(awsConfig.accessKeyId, awsConfig.secretAccessKey),
@@ -181,11 +176,11 @@
                     params: { Bucket: awsConfig.bucketName }
                 });
             } else {
-                showToast("Please configure your AWS and Firebase credentials in the script.", true);
+                showToast("Configuration not loaded. Please check config.js.", true);
             }
         }
         
-        // --- S3 & UI Logic ---
+        // --- S3 & UI Logic (unchanged) ---
         function getFullS3Path(key = '') {
             if (!currentUser) return '';
             return `${currentUser.uid}/${currentPath}${key}`;
@@ -280,18 +275,7 @@
         function createFileItem(name, isFolder, size) {
             const safeName = name.replace(/'/g, "\\'");
             const clickAction = isFolder ? `openFolder('${safeName}')` : `downloadFile('${safeName}')`;
-            const fileActions = !isFolder ? `
-                <a href="#" onclick="openFile('${safeName}')" class="text-blue-500 hover:text-blue-700" title="Open in New Tab">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path>
-                    </svg>
-                </a>
-                <a href="#" onclick="downloadFile('${safeName}')" class="text-green-500 hover:text-green-700" title="Download">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
-                    </svg>
-                </a>
-            ` : '';
+            const downloadAction = !isFolder ? `<a href="#" onclick="downloadFile('${safeName}')" class="text-blue-500 hover:text-blue-700" title="Download"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg></a>` : '';
             return `
                 <div class="file-item bg-white p-3 rounded-lg shadow-sm text-center cursor-pointer transition-shadow hover:shadow-md relative" ondblclick="${clickAction}">
                     <div class="flex justify-center items-center h-20">
@@ -300,7 +284,7 @@
                     <p class="text-sm font-medium text-gray-700 truncate mt-2" title="${name}">${name}</p>
                     ${!isFolder ? `<p class="text-xs text-gray-500">${formatBytes(size)}</p>` : '<p class="text-xs text-gray-500">-</p>'}
                     <div class="file-actions absolute top-2 right-2 flex space-x-2 opacity-0 transition-opacity">
-                         ${fileActions}
+                         ${downloadAction}
                          <button onclick="deleteFile('${safeName}', ${isFolder})" class="text-red-500 hover:text-red-700" title="Delete">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                         </button>
@@ -358,37 +342,17 @@
             const params = {
                 Bucket: awsConfig.bucketName,
                 Key: getFullS3Path(fileName),
-                Expires: 60,
-                ResponseContentDisposition: `attachment; filename="${fileName}"`
+                Expires: 60 
             };
             s3.getSignedUrl('getObject', params, (err, url) => {
                 if (err) showToast(`Could not get download link: ${err.message}`, true);
                 else {
-                    // Force download to laptop
                     const a = document.createElement('a');
                     a.href = url;
                     a.download = fileName;
-                    a.target = '_blank';
-                    a.style.display = 'none';
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
-                    showToast(`Downloading ${fileName}...`);
-                }
-            });
-        }
-
-        function openFile(fileName) {
-            const params = {
-                Bucket: awsConfig.bucketName,
-                Key: getFullS3Path(fileName),
-                Expires: 60 
-            };
-            s3.getSignedUrl('getObject', params, (err, url) => {
-                if (err) showToast(`Could not get file link: ${err.message}`, true);
-                else {
-                    // Open file in new tab
-                    window.open(url, '_blank');
                 }
             });
         }
@@ -404,7 +368,7 @@
             };
             const confirmHandler = () => {
                 modal.classList.add('hidden');
-                if (isFolder) deleteFolder(name); 
+                if (isFolder) deleteFolder(name);
                 else deleteSingleObject(name);
                 cleanup();
             };
