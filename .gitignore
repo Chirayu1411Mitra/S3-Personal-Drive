@@ -1,0 +1,19 @@
+# Local development configuration (contains sensitive data)
+# Temporarily allowing config.js for Vercel deployment
+config.js
+
+# Node modules (if you add any)
+node_modules/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
