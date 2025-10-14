@@ -1,9 +1,14 @@
+// --- Global Configuration ---
+// Added a constant for the bucket name for consistency and easier maintenance.
+const BUCKET_NAME = 'chirayu-personal-drive';
+
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 
 let s3;
 let currentUser = null;
 let currentPath = '';
+let cognitoIdentityId = null;
 
 // --- Authentication ---
 auth.onAuthStateChanged(user => {
@@ -16,15 +21,15 @@ auth.onAuthStateChanged(user => {
         userInfo.classList.add('flex');
         document.getElementById('user-email').textContent = user.email;
         initializeS3();
-        listFiles();
     } else {
         currentUser = null;
+        cognitoIdentityId = null; // Clear the cognito ID on logout
+        s3 = null; // Clear the s3 object
         document.getElementById('auth-container').classList.remove('hidden');
         document.getElementById('app-container').classList.add('hidden');
         document.getElementById('user-info').classList.add('hidden');
         document.getElementById('file-list').innerHTML = '';
         currentPath = '';
-         // Restore sign-in button state when user logs out
         const btn = document.getElementById('google-signin-btn');
         btn.disabled = false;
         btn.innerHTML = `
@@ -33,13 +38,11 @@ auth.onAuthStateChanged(user => {
         `;
     }
 });
-
 function signInWithGoogle() {
     const provider = new firebase.auth.GoogleAuthProvider();
     const btn = document.getElementById('google-signin-btn');
     const originalContent = btn.innerHTML;
 
-    // Update button to show loading state
     btn.disabled = true;
     btn.innerHTML = `
         <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-gray-700" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -49,11 +52,13 @@ function signInWithGoogle() {
         <span>Signing in...</span>
     `;
 
-    auth.signInWithPopup(provider)
+    auth.setPersistence(firebase.auth.Auth.Persistence.SESSION)
+        .then(() => {
+            return auth.signInWithPopup(provider);
+        })
         .catch(error => {
-            console.error("Google Sign-In Error:", error);
+            console.error("Authentication Error:", error);
             showToast(`Error: ${error.message}`, true);
-            // Restore button on error
             btn.disabled = false;
             btn.innerHTML = originalContent;
         });
@@ -65,24 +70,48 @@ function logout() {
 
 // --- S3 Initialization ---
 function initializeS3() {
-    if (awsConfig && !awsConfig.bucketName.startsWith('YOUR_')) {
-        AWS.config.update({
-            region: awsConfig.region,
-            credentials: new AWS.Credentials(awsConfig.accessKeyId, awsConfig.secretAccessKey),
-        });
-        s3 = new AWS.S3({
-            apiVersion: '2006-03-01',
-            params: { Bucket: awsConfig.bucketName }
-        });
-    } else {
-        showToast("Configuration not loaded. Please check config.js.", true);
+    if (!currentUser) {
+        console.error("User not logged in, cannot initialize S3.");
+        return;
     }
-}
 
-// --- S3 & UI Logic (unchanged) ---
+    currentUser.getIdToken(true).then(function(idToken) {
+        const identityPoolId = 'us-east-1:f1937ba0-e382-43c4-ae97-36dec2203549';
+        const bucketRegion = 'us-east-1';
+        const firebaseProjectName = 's3-personal-drive';
+
+        AWS.config.region = bucketRegion;
+        AWS.config.credentials = new AWS.CognitoIdentityCredentials({
+            IdentityPoolId: identityPoolId,
+            Logins: {
+                [`securetoken.google.com/${firebaseProjectName}`]: idToken
+            }
+        });
+
+        AWS.config.credentials.refresh((error) => {
+            if (error) {
+                console.error("Cognito credentials error:", error);
+                showToast("Error setting up S3 credentials.", true);
+            } else {
+                console.log("Cognito credentials obtained successfully.");
+                cognitoIdentityId = AWS.config.credentials.identityId;
+                // FIX: Removed the default bucket param. We'll add it to each call instead.
+                s3 = new AWS.S3({
+                    apiVersion: '2006-03-01'
+                });
+                listFiles();
+            }
+        });
+    }).catch(function(error) {
+        console.error("Firebase ID Token error:", error);
+        showToast("Could not get user token for S3 access.", true);
+    });
+}
+// --- S3 & UI Logic ---
+
 function getFullS3Path(key = '') {
-    if (!currentUser) return '';
-    return `${currentUser.uid}/${currentPath}${key}`;
+    if (!cognitoIdentityId) return '';
+    return `${cognitoIdentityId}/${currentPath}${key}`;
 }
 
 function showToast(message, isError = false) {
@@ -99,7 +128,6 @@ function renderBreadcrumbs() {
     const pathContainer = document.getElementById('folder-path');
     pathContainer.innerHTML = '';
     const parts = currentPath.split('/').filter(p => p);
-    
     const rootLink = document.createElement('a');
     rootLink.href = '#';
     rootLink.textContent = 'My Drive';
@@ -110,7 +138,6 @@ function renderBreadcrumbs() {
         listFiles();
     };
     pathContainer.appendChild(rootLink);
-
     let path = '';
     parts.forEach(part => {
         path += part + '/';
@@ -118,7 +145,6 @@ function renderBreadcrumbs() {
         separator.textContent = ' / ';
         separator.className = 'mx-1 text-gray-500';
         pathContainer.appendChild(separator);
-
         const partLink = document.createElement('a');
         partLink.href = '#';
         partLink.textContent = part;
@@ -134,15 +160,17 @@ function renderBreadcrumbs() {
 }
 
 function listFiles() {
-    if (!s3 || !currentUser) return;
+    if (!s3 || !cognitoIdentityId) return;
     document.getElementById('loader').classList.remove('hidden');
     document.getElementById('file-list').classList.add('hidden');
     renderBreadcrumbs();
+
     const params = {
-        Bucket: awsConfig.bucketName,
+        Bucket: BUCKET_NAME, // <-- FIX: Explicitly add Bucket name
         Prefix: getFullS3Path(),
         Delimiter: '/'
     };
+
     s3.listObjectsV2(params, (err, data) => {
         document.getElementById('loader').classList.add('hidden');
         document.getElementById('file-list').classList.remove('hidden');
@@ -153,7 +181,6 @@ function listFiles() {
         }
         const fileList = document.getElementById('file-list');
         fileList.innerHTML = '';
-        const userPrefix = `${currentUser.uid}/`;
         if (data.CommonPrefixes) {
             data.CommonPrefixes.forEach(prefix => {
                 const folderName = prefix.Prefix.replace(getFullS3Path(), '').replace('/', '');
@@ -163,18 +190,31 @@ function listFiles() {
         if (data.Contents) {
             data.Contents.forEach(file => {
                 const fileName = file.Key.replace(getFullS3Path(), '');
-                if (fileName && !fileName.endsWith('/')) { 
-                     fileList.innerHTML += createFileItem(fileName, false, file.Size, file.LastModified);
+                if (fileName && !fileName.endsWith('/')) {
+                    fileList.innerHTML += createFileItem(fileName, false, file.Size, file.LastModified);
                 }
             });
         }
     });
 }
-
 function createFileItem(name, isFolder, size) {
     const safeName = name.replace(/'/g, "\\'");
-    const clickAction = isFolder ? `openFolder('${safeName}')` : `downloadFile('${safeName}')`;
-    const downloadAction = !isFolder ? `<a href="#" onclick="downloadFile('${safeName}')" class="text-blue-500 hover:text-blue-700" title="Download"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg></a>` : '';
+    const clickAction = isFolder ? `openFolder('${safeName}')` : `viewFile(event, '${safeName}')`;
+    let actions = `
+        <button onclick="deleteFile('${safeName}', ${isFolder})" class="text-red-500 hover:text-red-700" title="Delete">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+        </button>
+    `;
+    if (!isFolder) {
+        actions = `
+            <button onclick="viewFile(event, '${safeName}')" class="text-green-500 hover:text-green-700" title="View">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+            </button>
+            <button onclick="downloadFile(event, '${safeName}')" class="text-blue-500 hover:text-blue-700" title="Download">
+                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+            </button>
+        ` + actions;
+    }
     return `
         <div class="file-item bg-white p-3 rounded-lg shadow-sm text-center cursor-pointer transition-shadow hover:shadow-md relative" ondblclick="${clickAction}">
             <div class="flex justify-center items-center h-20">
@@ -183,15 +223,11 @@ function createFileItem(name, isFolder, size) {
             <p class="text-sm font-medium text-gray-700 truncate mt-2" title="${name}">${name}</p>
             ${!isFolder ? `<p class="text-xs text-gray-500">${formatBytes(size)}</p>` : '<p class="text-xs text-gray-500">-</p>'}
             <div class="file-actions absolute top-2 right-2 flex space-x-2 opacity-0 transition-opacity">
-                 ${downloadAction}
-                 <button onclick="deleteFile('${safeName}', ${isFolder})" class="text-red-500 hover:text-red-700" title="Delete">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                </button>
+                ${actions}
             </div>
         </div>
     `;
 }
-
 function openFolder(folderName) {
     currentPath += folderName + '/';
     listFiles();
@@ -201,7 +237,7 @@ function createFolder() {
     const folderName = prompt("Enter folder name:");
     if (folderName && folderName.trim()) {
         const params = {
-            Bucket: awsConfig.bucketName,
+            Bucket: BUCKET_NAME, // <-- FIX: Explicitly add Bucket name
             Key: getFullS3Path(folderName + '/')
         };
         s3.putObject(params, (err, data) => {
@@ -219,12 +255,12 @@ function uploadFile() {
     if (files.length === 0) return;
     Array.from(files).forEach(file => {
         const params = {
-            Bucket: awsConfig.bucketName,
+            Bucket: BUCKET_NAME, // <-- FIX: Explicitly add Bucket name
             Key: getFullS3Path(file.name),
             Body: file,
             ContentType: file.type
         };
-        const upload = new AWS.S3.ManagedUpload({ params });
+        const upload = new AWS.S3.ManagedUpload({ s3: s3, params: params });
         upload.on('httpUploadProgress', evt => showToast(`Uploading ${file.name}: ${parseInt((evt.loaded * 100) / evt.total)}%`));
         upload.promise().then(
             data => {
@@ -234,24 +270,43 @@ function uploadFile() {
             err => showToast(`Error uploading ${file.name}: ${err.message}`, true)
         );
     });
-    document.getElementById('upload-input').value = ''; 
+    document.getElementById('upload-input').value = '';
 }
 
-function downloadFile(fileName) {
+function downloadFile(event, fileName) {
+    event.preventDefault();
     const params = {
-        Bucket: awsConfig.bucketName,
+        Bucket: BUCKET_NAME, // <-- FIX: Explicitly add Bucket name
         Key: getFullS3Path(fileName),
-        Expires: 60 
+        Expires: 300,
+        ResponseContentDisposition: `attachment; filename="${fileName}"`
     };
     s3.getSignedUrl('getObject', params, (err, url) => {
-        if (err) showToast(`Could not get download link: ${err.message}`, true);
-        else {
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = fileName;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+        if (err) {
+            showToast(`Could not get download link: ${err.message}`, true);
+            return;
+        }
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    });
+}
+
+function viewFile(event, fileName) {
+    event.preventDefault();
+    const params = {
+        Bucket: BUCKET_NAME, // <-- FIX: Explicitly add Bucket name
+        Key: getFullS3Path(fileName),
+        Expires: 60
+    };
+    s3.getSignedUrl('getObject', params, (err, url) => {
+        if (err) {
+            showToast(`Could not get view link: ${err.message}`, true);
+        } else {
+            window.open(url, '_blank');
         }
     });
 }
@@ -279,8 +334,11 @@ function deleteFile(name, isFolder) {
     cancelBtn.addEventListener('click', cancelHandler);
 }
 
-function deleteSingleObject(fileName){
-     const params = { Bucket: awsConfig.bucketName, Key: getFullS3Path(fileName) };
+function deleteSingleObject(fileName) {
+    const params = {
+        Bucket: BUCKET_NAME, // <-- FIX: Explicitly add Bucket name
+        Key: getFullS3Path(fileName)
+    };
     s3.deleteObject(params, (err, data) => {
         if (err) showToast(`Error deleting file: ${err.message}`, true);
         else {
@@ -290,23 +348,45 @@ function deleteSingleObject(fileName){
     });
 }
 
-function deleteFolder(folderName) {
+// UPGRADE: Replaced with a more robust async function.
+// This handles folders with more than 1,000 items and ensures the folder marker is also deleted.
+async function deleteFolder(folderName) {
     const prefix = getFullS3Path(folderName + '/');
-    s3.listObjectsV2({ Bucket: awsConfig.bucketName, Prefix: prefix }, (err, data) => {
-        if (err) return showToast(`Error listing folder contents: ${err.message}`, true);
-        if (data.Contents.length === 0) {
-            deleteSingleObject(folderName + '/');
+    let continuationToken;
+
+    do {
+        try {
+            const listParams = {
+                Bucket: BUCKET_NAME,
+                Prefix: prefix,
+                ContinuationToken: continuationToken
+            };
+            const listedObjects = await s3.listObjectsV2(listParams).promise();
+
+            if (listedObjects.Contents.length === 0) break;
+
+            const deleteParams = {
+                Bucket: BUCKET_NAME,
+                Delete: { Objects: listedObjects.Contents.map(({ Key }) => ({ Key })) }
+            };
+            await s3.deleteObjects(deleteParams).promise();
+
+            if (!listedObjects.IsTruncated) break;
+            continuationToken = listedObjects.NextContinuationToken;
+
+        } catch (err) {
+            showToast(`Error deleting folder contents: ${err.message}`, true);
             return;
         }
-        const objectsToDelete = data.Contents.map(item => ({ Key: item.Key }));
-        s3.deleteObjects({ Bucket: awsConfig.bucketName, Delete: { Objects: objectsToDelete } }, (err, data) => {
-            if (err) showToast(`Error deleting folder contents: ${err.message}`, true);
-            else {
-                showToast(`Folder '${folderName}' deleted successfully.`);
-                listFiles();
-            }
-        });
-    });
+    } while (continuationToken);
+
+    try {
+        await s3.deleteObject({ Bucket: BUCKET_NAME, Key: prefix }).promise();
+        showToast(`Folder '${folderName}' deleted successfully.`);
+        listFiles();
+    } catch (err) {
+        showToast(`Error finalizing folder deletion: ${err.message}`, true);
+    }
 }
 
 function getFileIcon(isFolder, fileName = '') {
