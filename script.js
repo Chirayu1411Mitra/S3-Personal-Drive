@@ -166,7 +166,7 @@ function listFiles() {
     renderBreadcrumbs();
 
     const params = {
-        Bucket: BUCKET_NAME, // <-- FIX: Explicitly add Bucket name
+        Bucket: BUCKET_NAME,
         Prefix: getFullS3Path(),
         Delimiter: '/'
     };
@@ -179,8 +179,10 @@ function listFiles() {
             showToast(`Error: ${err.message}`, true);
             return;
         }
+        
         const fileList = document.getElementById('file-list');
         fileList.innerHTML = '';
+
         if (data.CommonPrefixes) {
             data.CommonPrefixes.forEach(prefix => {
                 const folderName = prefix.Prefix.replace(getFullS3Path(), '').replace('/', '');
@@ -195,11 +197,57 @@ function listFiles() {
                 }
             });
         }
+        
+        // --- START: New Lazy Loading Logic ---
+        const lazyImages = document.querySelectorAll('.lazy-image');
+
+        const imageObserver = new IntersectionObserver((entries, observer) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    const img = entry.target;
+                    const fileName = img.dataset.src; // Get filename from data-src
+
+                    const params = {
+                        Bucket: BUCKET_NAME,
+                        Key: getFullS3Path(fileName),
+                        Expires: 60
+                    };
+
+                    s3.getSignedUrl('getObject', params, (err, url) => {
+                        if (url) {
+                            img.src = url; // Set the real image source
+                            img.classList.remove('lazy-image'); // Stop observing it
+                            observer.unobserve(img);
+                        }
+                    });
+                }
+            });
+        });
+
+        lazyImages.forEach(img => {
+            imageObserver.observe(img); // Start watching each image
+        });
+        // --- END: New Lazy Loading Logic ---
     });
-}
+}   
 function createFileItem(name, isFolder, size) {
     const safeName = name.replace(/'/g, "\\'");
     const clickAction = isFolder ? `openFolder('${safeName}')` : `viewFile(event, '${safeName}')`;
+    
+    let iconOrPreview;
+    const extension = isFolder ? null : name.split('.').pop().toLowerCase();
+    const isImage = ['jpg', 'jpeg', 'png', 'gif', 'svg'].includes(extension);
+
+    if (isImage) {
+        // MODIFICATION: Add class="lazy-image" and data-src attribute.
+        // The src is a tiny, blurry placeholder to start with.
+        iconOrPreview = `<img class="lazy-image w-16 h-16 object-cover bg-gray-200 rounded-md" data-src="${safeName}" alt="${name}" src="data:image/gif;base64,R0lGODlhAQABAIAAAMLCwgAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==">`;
+    } else {
+        iconOrPreview = getFileIcon(isFolder, name);
+    }
+    
+    // ... (the rest of the function stays exactly the same) ...
+
     let actions = `
         <button onclick="deleteFile('${safeName}', ${isFolder})" class="text-red-500 hover:text-red-700" title="Delete">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
@@ -218,7 +266,7 @@ function createFileItem(name, isFolder, size) {
     return `
         <div class="file-item bg-white p-3 rounded-lg shadow-sm text-center cursor-pointer transition-shadow hover:shadow-md relative" ondblclick="${clickAction}">
             <div class="flex justify-center items-center h-20">
-                ${getFileIcon(isFolder, name)}
+                ${iconOrPreview}
             </div>
             <p class="text-sm font-medium text-gray-700 truncate mt-2" title="${name}">${name}</p>
             ${!isFolder ? `<p class="text-xs text-gray-500">${formatBytes(size)}</p>` : '<p class="text-xs text-gray-500">-</p>'}
@@ -227,6 +275,26 @@ function createFileItem(name, isFolder, size) {
             </div>
         </div>
     `;
+}function loadPreviews(imageFiles) {
+    imageFiles.forEach(fileName => {
+        const params = {
+            Bucket: BUCKET_NAME,
+            Key: getFullS3Path(fileName),
+            Expires: 60 // URL will be valid for 60 seconds
+        };
+
+        // Generate a temporary, secure URL for the image
+        s3.getSignedUrl('getObject', params, (err, url) => {
+            if (url) {
+                // Find the correct image tag by its unique ID and set the source
+                const previewId = `preview-${fileName.replace(/[^a-zA-Z0-9]/g, '')}`;
+                const imgElement = document.getElementById(previewId);
+                if (imgElement) {
+                    imgElement.src = url;
+                }
+            }
+        });
+    });
 }
 function openFolder(folderName) {
     currentPath += folderName + '/';
@@ -253,26 +321,54 @@ function createFolder() {
 function uploadFile() {
     const files = document.getElementById('upload-input').files;
     if (files.length === 0) return;
+
+    // Get references to our new modal elements
+    const modal = document.getElementById('upload-progress-modal');
+    const fileNameSpan = document.getElementById('upload-filename');
+    const progressBar = document.getElementById('upload-progress-bar');
+    const progressText = document.getElementById('upload-progress-text');
+
     Array.from(files).forEach(file => {
+        // --- Show and reset the modal for each file ---
+        fileNameSpan.textContent = file.name;
+        progressBar.style.width = '0%';
+        progressText.textContent = '0%';
+        modal.classList.remove('hidden');
+        
         const params = {
-            Bucket: BUCKET_NAME, // <-- FIX: Explicitly add Bucket name
+            Bucket: BUCKET_NAME,
             Key: getFullS3Path(file.name),
             Body: file,
             ContentType: file.type
         };
+
         const upload = new AWS.S3.ManagedUpload({ s3: s3, params: params });
-        upload.on('httpUploadProgress', evt => showToast(`Uploading ${file.name}: ${parseInt((evt.loaded * 100) / evt.total)}%`));
+
+        // --- Update the progress bar inside the modal ---
+        upload.on('httpUploadProgress', evt => {
+            const percent = parseInt((evt.loaded * 100) / evt.total);
+            progressBar.style.width = percent + '%';
+            progressText.textContent = percent + '%';
+        });
+
         upload.promise().then(
             data => {
+                // --- On success: hide the modal and show a success toast ---
+                modal.classList.add('hidden');
                 showToast(`Successfully uploaded ${file.name}.`);
                 listFiles();
             },
-            err => showToast(`Error uploading ${file.name}: ${err.message}`, true)
+            err => {
+                // --- On error: hide the modal and show an error toast ---
+                modal.classList.add('hidden');
+                showToast(`Error uploading ${file.name}: ${err.message}`, true)
+            }
         );
     });
+    
+    // Clear the input so the user can upload the same file again if needed
     document.getElementById('upload-input').value = '';
 }
-
 function downloadFile(event, fileName) {
     event.preventDefault();
     const params = {
