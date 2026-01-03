@@ -9,6 +9,7 @@ let s3;
 let currentUser = null;
 let currentPath = '';
 let cognitoIdentityId = null;
+let selectedItems = [];
 
 // --- Authentication ---
 auth.onAuthStateChanged(user => {
@@ -75,7 +76,7 @@ function initializeS3() {
         return;
     }
 
-    currentUser.getIdToken(true).then(function(idToken) {
+    currentUser.getIdToken(true).then(function (idToken) {
         const identityPoolId = 'us-east-1:f1937ba0-e382-43c4-ae97-36dec2203549';
         const bucketRegion = 'us-east-1';
         const firebaseProjectName = 's3-personal-drive';
@@ -102,7 +103,7 @@ function initializeS3() {
                 listFiles();
             }
         });
-    }).catch(function(error) {
+    }).catch(function (error) {
         console.error("Firebase ID Token error:", error);
         showToast("Could not get user token for S3 access.", true);
     });
@@ -159,8 +160,16 @@ function renderBreadcrumbs() {
     });
 }
 
+// Global render ID to prevent race conditions
+let lastRenderId = 0;
+
 function listFiles() {
     if (!s3 || !cognitoIdentityId) return;
+
+    // Increment render ID for this new request
+    lastRenderId++;
+    const currentRenderId = lastRenderId;
+
     document.getElementById('loader').classList.remove('hidden');
     document.getElementById('file-list').classList.add('hidden');
     renderBreadcrumbs();
@@ -172,6 +181,12 @@ function listFiles() {
     };
 
     s3.listObjectsV2(params, (err, data) => {
+        // If a newer request has started, ignore this result
+        if (currentRenderId !== lastRenderId) {
+            console.log('Ignoring stale listFiles result');
+            return;
+        }
+
         document.getElementById('loader').classList.add('hidden');
         document.getElementById('file-list').classList.remove('hidden');
         if (err) {
@@ -179,7 +194,7 @@ function listFiles() {
             showToast(`Error: ${err.message}`, true);
             return;
         }
-        
+
         const fileList = document.getElementById('file-list');
         fileList.innerHTML = '';
 
@@ -197,85 +212,129 @@ function listFiles() {
                 }
             });
         }
-        
-        // --- START: New Lazy Loading Logic ---
+
+        // --- START: Optimized Lazy Loading Logic with URL Caching ---
+
         const lazyImages = document.querySelectorAll('.lazy-image');
+
+        // Use global cache if available, or initialize
+        if (!window.signedUrlCache) window.signedUrlCache = {};
+        const urlCache = window.signedUrlCache;
+        const now = Date.now();
+
+        // Pre-generate or retrieve signed URLs
+        lazyImages.forEach(img => {
+            const fileName = img.dataset.src;
+            const cacheKey = getFullS3Path(fileName);
+
+            // Check if we have a valid cached URL (buffer of 5 minutes before actual expiry)
+            if (urlCache[cacheKey] && urlCache[cacheKey].expires > now + 300000) {
+                // Use cached URL
+                // We don't need to do anything here as we'll set it in the observer
+            } else {
+                // Generate new URL
+                const params = {
+                    Bucket: BUCKET_NAME,
+                    Key: cacheKey,
+                    Expires: 3600  // 1 hour
+                };
+                const url = s3.getSignedUrl('getObject', params);
+                urlCache[cacheKey] = {
+                    url: url,
+                    expires: now + (3600 * 1000) // Store expiration time
+                };
+            }
+        });
 
         const imageObserver = new IntersectionObserver((entries, observer) => {
             entries.forEach(entry => {
                 if (entry.isIntersecting) {
                     const img = entry.target;
-                    const fileName = img.dataset.src; // Get filename from data-src
+                    const fileName = img.dataset.src;
+                    const cacheKey = getFullS3Path(fileName);
 
-                    const params = {
-                        Bucket: BUCKET_NAME,
-                        Key: getFullS3Path(fileName),
-                        Expires: 60
-                    };
+                    if (urlCache[cacheKey]) {
+                        img.src = urlCache[cacheKey].url;
+                    }
 
-                    s3.getSignedUrl('getObject', params, (err, url) => {
-                        if (url) {
-                            img.src = url; // Set the real image source
-                            img.classList.remove('lazy-image'); // Stop observing it
-                            observer.unobserve(img);
-                        }
-                    });
+                    img.classList.remove('lazy-image');
+                    observer.unobserve(img);
                 }
             });
         });
 
         lazyImages.forEach(img => {
-            imageObserver.observe(img); // Start watching each image
+            imageObserver.observe(img);
         });
-        // --- END: New Lazy Loading Logic ---
+        // --- END: Optimized Lazy Loading Logic for Full Quality Previews ---
     });
-}   
+}
 function createFileItem(name, isFolder, size) {
     const safeName = name.replace(/'/g, "\\'");
-    const clickAction = isFolder ? `openFolder('${safeName}')` : `viewFile(event, '${safeName}')`;
-    
-    let iconOrPreview;
     const extension = isFolder ? null : name.split('.').pop().toLowerCase();
     const isImage = ['jpg', 'jpeg', 'png', 'gif', 'svg'].includes(extension);
 
+    // MODIFICATION: Use openImagePreview for images
+    const clickAction = isFolder ? `openFolder('${safeName}')` : (isImage ? `openImagePreview('${safeName}')` : `viewFile(event, '${safeName}')`);
+    const isSelected = selectedItems.some(item => item.name === name && item.isFolder === isFolder);
+
+    let iconOrPreview;
+
     if (isImage) {
-        // MODIFICATION: Add class="lazy-image" and data-src attribute.
-        // The src is a tiny, blurry placeholder to start with.
+        // ... (lazy image logic remains the same) ...
         iconOrPreview = `<img class="lazy-image w-16 h-16 object-cover bg-gray-200 rounded-md" data-src="${safeName}" alt="${name}" src="data:image/gif;base64,R0lGODlhAQABAIAAAMLCwgAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==">`;
     } else {
         iconOrPreview = getFileIcon(isFolder, name);
     }
-    
-    // ... (the rest of the function stays exactly the same) ...
+
+    // ...
 
     let actions = `
-        <button onclick="deleteFile('${safeName}', ${isFolder})" class="text-red-500 hover:text-red-700" title="Delete">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+        <button onclick="deleteFile('${safeName}', ${isFolder})" class="p-2 rounded-full bg-white/90 text-red-500 hover:bg-red-50 hover:text-red-600 shadow-sm transition-all duration-200 hover:scale-110" title="Delete">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
         </button>
     `;
     if (!isFolder) {
+        // MODIFICATION: Update 'View' button action as well
+        const viewAction = isImage ? `openImagePreview('${safeName}')` : `viewFile(event, '${safeName}')`;
         actions = `
-            <button onclick="viewFile(event, '${safeName}')" class="text-green-500 hover:text-green-700" title="View">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+            <button onclick="${viewAction}" class="p-2 rounded-full bg-white/90 text-primary-500 hover:bg-primary-50 hover:text-primary-600 shadow-sm transition-all duration-200 hover:scale-110" title="View">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
             </button>
-            <button onclick="downloadFile(event, '${safeName}')" class="text-blue-500 hover:text-blue-700" title="Download">
-                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+            <button onclick="downloadFile(event, '${safeName}')" class="p-2 rounded-full bg-white/90 text-blue-500 hover:bg-blue-50 hover:text-blue-600 shadow-sm transition-all duration-200 hover:scale-110" title="Download">
+                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
             </button>
         ` + actions;
     }
     return `
-        <div class="file-item bg-white p-3 rounded-lg shadow-sm text-center cursor-pointer transition-shadow hover:shadow-md relative" ondblclick="${clickAction}">
-            <div class="flex justify-center items-center h-20">
-                ${iconOrPreview}
+        <div class="file-item group bg-white p-4 rounded-2xl shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative border border-slate-100 fade-in-up ${isSelected ? 'ring-2 ring-primary-500 bg-primary-50' : ''}" 
+             data-name="${safeName}" 
+             data-isfolder="${isFolder}" 
+             ondblclick="${clickAction}" 
+             onclick="if(event.target.type !== 'checkbox') toggleSelection('${safeName}', ${isFolder})">
+            
+            <div class="absolute top-3 left-3 z-10 opacity-0 group-hover:opacity-100 transition-opacity duration-200 ${isSelected ? 'opacity-100' : ''}">
+                 <input type="checkbox" class="w-5 h-5 text-primary-600 bg-gray-100 border-gray-300 rounded focus:ring-primary-500 transition-all duration-300 cursor-pointer" ${isSelected ? 'checked' : ''} onchange="event.stopPropagation(); toggleSelection('${safeName}', ${isFolder})">
             </div>
-            <p class="text-sm font-medium text-gray-700 truncate mt-2" title="${name}">${name}</p>
-            ${!isFolder ? `<p class="text-xs text-gray-500">${formatBytes(size)}</p>` : '<p class="text-xs text-gray-500">-</p>'}
-            <div class="file-actions absolute top-2 right-2 flex space-x-2 opacity-0 transition-opacity">
+
+            <div class="flex flex-col items-center justify-center space-y-3 py-2 cursor-pointer">
+                <div class="transform group-hover:scale-110 transition-transform duration-300 drop-shadow-sm">
+                    ${iconOrPreview}
+                </div>
+                <div class="text-center w-full">
+                    <p class="text-sm font-semibold text-slate-700 truncate px-2" title="${name}">${name}</p>
+                    ${!isFolder ? `<p class="text-xs text-slate-400 mt-1 font-medium bg-slate-50 inline-block px-2 py-0.5 rounded-full border border-slate-100">${formatBytes(size)}</p>` : '<p class="text-xs text-slate-300 mt-1">-</p>'}
+                </div>
+            </div>
+
+            <div class="file-actions absolute top-2 right-2 flex flex-col space-y-1 opacity-0 group-hover:opacity-100 transition-all duration-200 transform translate-x-2 group-hover:translate-x-0">
                 ${actions}
             </div>
         </div>
     `;
-}function loadPreviews(imageFiles) {
+}
+
+function loadPreviews(imageFiles) {
     imageFiles.forEach(fileName => {
         const params = {
             Bucket: BUCKET_NAME,
@@ -295,6 +354,154 @@ function createFileItem(name, isFolder, size) {
             }
         });
     });
+}
+
+function toggleSelection(name, isFolder) {
+    const index = selectedItems.findIndex(item => item.name === name && item.isFolder === isFolder);
+    if (index > -1) {
+        selectedItems.splice(index, 1);
+    } else {
+        selectedItems.push({ name, isFolder });
+    }
+    // Update UI directly without reloading files
+    updateSelectionUI(name, isFolder);
+}
+
+function updateSelectionUI(name, isFolder) {
+    const fileItems = document.querySelectorAll('.file-item');
+    fileItems.forEach(item => {
+        const itemName = item.dataset.name;
+        const itemIsFolder = item.dataset.isfolder === 'true';
+        if (itemName === name && itemIsFolder === isFolder) {
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            const isSelected = selectedItems.some(sel => sel.name === name && sel.isFolder === isFolder);
+            checkbox.checked = isSelected;
+            item.classList.toggle('ring-2', isSelected);
+            item.classList.toggle('ring-blue-500', isSelected);
+        }
+    });
+}
+
+function selectAll() {
+    selectedItems = [];
+    const fileList = document.getElementById('file-list');
+    const items = fileList.querySelectorAll('.file-item');
+    items.forEach(item => {
+        const checkbox = item.querySelector('input[type="checkbox"]');
+        if (checkbox) {
+            checkbox.checked = true;
+            const name = item.dataset.name;
+            const isFolder = item.dataset.isfolder === 'true';
+            selectedItems.push({ name, isFolder });
+            // Update UI directly
+            item.classList.add('ring-2', 'ring-blue-500');
+        }
+    });
+}
+
+function downloadSelected() {
+    if (selectedItems.length === 1 && !selectedItems[0].isFolder) {
+        // Single file: download normally
+        downloadFile(new Event('click'), selectedItems[0].name);
+    } else {
+        // Multiple items or any folder: download as ZIP
+        downloadAsZip();
+    }
+}
+
+async function downloadAsZip() {
+    if (selectedItems.length === 0) {
+        showToast('No items selected for ZIP download.', true);
+        return;
+    }
+
+    // Show the ZIP progress modal
+    const modal = document.getElementById('zip-progress-modal');
+    const fileNameSpan = document.getElementById('zip-filename');
+    const progressBar = document.getElementById('zip-progress-bar');
+    const progressText = document.getElementById('zip-progress-text');
+
+    fileNameSpan.textContent = 'selected-files.zip';
+    progressBar.style.width = '0%';
+    progressText.textContent = '0%';
+    modal.classList.remove('hidden');
+
+    const zip = new JSZip();
+    let hasFiles = false;
+    let totalItems = selectedItems.length;
+    let processedItems = 0;
+
+    for (const item of selectedItems) {
+        if (item.isFolder) {
+            // Recursively add folder contents
+            await addFolderToZip(zip, item.name);
+        } else {
+            // Add file
+            const params = {
+                Bucket: BUCKET_NAME,
+                Key: getFullS3Path(item.name)
+            };
+            try {
+                const data = await s3.getObject(params).promise();
+                zip.file(item.name, data.Body);
+                hasFiles = true;
+            } catch (err) {
+                console.error(`Error fetching ${item.name}:`, err);
+            }
+        }
+        processedItems++;
+        const percent = Math.round((processedItems / totalItems) * 100);
+        progressBar.style.width = percent + '%';
+        progressText.textContent = percent + '%';
+    }
+
+    if (!hasFiles) {
+        modal.classList.add('hidden');
+        showToast('No files to download.', true);
+        return;
+    }
+
+    // Update progress to 100% before generating ZIP
+    progressBar.style.width = '100%';
+    progressText.textContent = '100%';
+
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'selected-files.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    // Hide the modal after download
+    modal.classList.add('hidden');
+    showToast('ZIP download completed.');
+}
+
+async function addFolderToZip(zip, folderName) {
+    const prefix = getFullS3Path(folderName + '/');
+    let continuationToken;
+
+    do {
+        const listParams = {
+            Bucket: BUCKET_NAME,
+            Prefix: prefix,
+            ContinuationToken: continuationToken
+        };
+        const listedObjects = await s3.listObjectsV2(listParams).promise();
+
+        for (const obj of listedObjects.Contents) {
+            const relativePath = obj.Key.replace(prefix, '');
+            if (relativePath) {
+                const data = await s3.getObject({ Bucket: BUCKET_NAME, Key: obj.Key }).promise();
+                zip.file(`${folderName}/${relativePath}`, data.Body);
+            }
+        }
+
+        continuationToken = listedObjects.IsTruncated ? listedObjects.NextContinuationToken : null;
+    } while (continuationToken);
 }
 function openFolder(folderName) {
     currentPath += folderName + '/';
@@ -328,13 +535,17 @@ function uploadFile() {
     const progressBar = document.getElementById('upload-progress-bar');
     const progressText = document.getElementById('upload-progress-text');
 
-    Array.from(files).forEach(file => {
+    Array.from(files).forEach(async file => {
         // --- Show and reset the modal for each file ---
         fileNameSpan.textContent = file.name;
         progressBar.style.width = '0%';
         progressText.textContent = '0%';
         modal.classList.remove('hidden');
-        
+
+        const extension = file.name.split('.').pop().toLowerCase();
+        const isImage = ['jpg', 'jpeg', 'png', 'gif'].includes(extension);
+
+        // Upload the original file
         const params = {
             Bucket: BUCKET_NAME,
             Key: getFullS3Path(file.name),
@@ -351,23 +562,71 @@ function uploadFile() {
             progressText.textContent = percent + '%';
         });
 
-        upload.promise().then(
-            data => {
-                // --- On success: hide the modal and show a success toast ---
-                modal.classList.add('hidden');
-                showToast(`Successfully uploaded ${file.name}.`);
-                listFiles();
-            },
-            err => {
-                // --- On error: hide the modal and show an error toast ---
-                modal.classList.add('hidden');
-                showToast(`Error uploading ${file.name}: ${err.message}`, true)
+        try {
+            await upload.promise();
+
+            // If it's an image, generate and upload a thumbnail
+            if (isImage) {
+                const thumbnailBlob = await generateThumbnail(file);
+                const thumbName = file.name.replace(/\.[^/.]+$/, "-thumb.$&");
+                const thumbParams = {
+                    Bucket: BUCKET_NAME,
+                    Key: getFullS3Path(thumbName),
+                    Body: thumbnailBlob,
+                    ContentType: file.type
+                };
+                await s3.upload(thumbParams).promise();
             }
-        );
+
+            // --- On success: hide the modal and show a success toast ---
+            modal.classList.add('hidden');
+            showToast(`Successfully uploaded ${file.name}.`);
+            listFiles();
+        } catch (err) {
+            // --- On error: hide the modal and show an error toast ---
+            modal.classList.add('hidden');
+            showToast(`Error uploading ${file.name}: ${err.message}`, true);
+        }
     });
-    
+
     // Clear the input so the user can upload the same file again if needed
     document.getElementById('upload-input').value = '';
+}
+
+// Function to generate a thumbnail using canvas
+async function generateThumbnail(file) {
+    return new Promise((resolve) => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const img = new Image();
+
+        img.onload = () => {
+            // Set thumbnail size to 200x200, maintaining aspect ratio
+            const maxSize = 200;
+            let { width, height } = img;
+
+            if (width > height) {
+                if (width > maxSize) {
+                    height = (height * maxSize) / width;
+                    width = maxSize;
+                }
+            } else {
+                if (height > maxSize) {
+                    width = (width * maxSize) / height;
+                    height = maxSize;
+                }
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+
+            ctx.drawImage(img, 0, 0, width, height);
+
+            canvas.toBlob(resolve, file.type, 0.8); // 80% quality for smaller size
+        };
+
+        img.src = URL.createObjectURL(file);
+    });
 }
 function downloadFile(event, fileName) {
     event.preventDefault();
@@ -504,3 +763,90 @@ function formatBytes(bytes, decimals = 2) {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
+
+// --- Image Preview Modal Logic ---
+
+function openImagePreview(fileName) {
+    const modal = document.getElementById('image-preview-modal');
+    const previewImage = document.getElementById('preview-image');
+    const loader = document.getElementById('preview-loader');
+    const filenameLabel = document.getElementById('preview-filename');
+    const downloadBtn = document.getElementById('preview-download-btn');
+
+    // Reset state
+    previewImage.src = '';
+    previewImage.classList.add('hidden');
+    loader.classList.remove('hidden');
+    filenameLabel.textContent = fileName;
+
+    // Setup Download Button
+    downloadBtn.onclick = (e) => {
+        e.stopPropagation();
+        downloadFile(new Event('click'), fileName);
+    };
+
+    // Show modal
+    modal.classList.remove('hidden');
+    // Small delay to allow transition
+    setTimeout(() => {
+        modal.classList.remove('opacity-0');
+    }, 10);
+
+    // Fetch URL (check cache first)
+    const cacheKey = getFullS3Path(fileName);
+    const now = Date.now();
+    let url = '';
+
+    if (window.signedUrlCache && window.signedUrlCache[cacheKey] && window.signedUrlCache[cacheKey].expires > now + 60000) {
+        url = window.signedUrlCache[cacheKey].url;
+        setImageSource(url);
+    } else {
+        const params = {
+            Bucket: BUCKET_NAME,
+            Key: cacheKey,
+            Expires: 3600
+        };
+        // Get new signed URL
+        url = s3.getSignedUrl('getObject', params);
+        // Cache it
+        if (!window.signedUrlCache) window.signedUrlCache = {};
+        window.signedUrlCache[cacheKey] = {
+            url: url,
+            expires: now + (3600 * 1000)
+        };
+        setImageSource(url);
+    }
+
+    function setImageSource(src) {
+        const img = new Image();
+        img.onload = () => {
+            previewImage.src = src;
+            loader.classList.add('hidden');
+            previewImage.classList.remove('hidden');
+        };
+        img.onerror = () => {
+            loader.classList.add('hidden');
+            showToast('Failed to load image preview', true);
+        };
+        img.src = src;
+    }
+}
+
+function closeImagePreview() {
+    const modal = document.getElementById('image-preview-modal');
+    modal.classList.add('opacity-0');
+    setTimeout(() => {
+        modal.classList.add('hidden');
+        document.getElementById('preview-image').src = '';
+    }, 300);
+}
+
+// Close on Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const modal = document.getElementById('image-preview-modal');
+        if (!modal.classList.contains('hidden')) {
+            closeImagePreview();
+        }
+    }
+});
