@@ -4,6 +4,7 @@ const BUCKET_NAME = 'chirayu-personal-drive';
 
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
+const db = firebase.firestore();
 
 let s3;
 let currentUser = null;
@@ -96,6 +97,9 @@ function initializeS3() {
             } else {
                 console.log("Cognito credentials obtained successfully.");
                 cognitoIdentityId = AWS.config.credentials.identityId;
+                if (currentUser) {
+                    saveIdentityIdToFirestore(currentUser.uid, cognitoIdentityId, currentUser.email);
+                }
                 // FIX: Removed the default bucket param. We'll add it to each call instead.
                 s3 = new AWS.S3({
                     apiVersion: '2006-03-01'
@@ -108,6 +112,24 @@ function initializeS3() {
         showToast("Could not get user token for S3 access.", true);
     });
 }
+
+// --- Save Cognito Identity to Firestore ---
+async function saveIdentityIdToFirestore(userId, identityId, email) {
+    try {
+        const userRef = db.collection("users").doc(userId);
+        await userRef.set({
+            s3_folder_id: identityId,
+            email: email,
+            lastLogin: firebase.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+       // showToast("Identity ID saved to Firestore!");
+    } catch (error) {
+        console.error("Error saving Identity ID to Firestore:", error);
+        console.error("Error details:", error.message, error.code);
+        showToast("Failed to save to Firestore: " + error.message, true);
+    }
+}
+
 // --- S3 & UI Logic ---
 
 function getFullS3Path(key = '') {
