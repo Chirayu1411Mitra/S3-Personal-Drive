@@ -77,12 +77,17 @@ function initializeS3() {
         return;
     }
 
+    // Force fresh token to avoid stale token issues
     currentUser.getIdToken(true).then(function (idToken) {
         const identityPoolId = 'us-east-1:f1937ba0-e382-43c4-ae97-36dec2203549';
         const bucketRegion = 'us-east-1';
         const firebaseProjectName = 's3-personal-drive';
 
         AWS.config.region = bucketRegion;
+        
+        // Clear any existing credentials first
+        AWS.config.credentials = null;
+        
         AWS.config.credentials = new AWS.CognitoIdentityCredentials({
             IdentityPoolId: identityPoolId,
             Logins: {
@@ -93,7 +98,11 @@ function initializeS3() {
         AWS.config.credentials.refresh((error) => {
             if (error) {
                 console.error("Cognito credentials error:", error);
-                showToast("Error setting up S3 credentials.", true);
+                showToast("Error setting up S3 credentials. Retrying...", true);
+                // Retry once after a brief delay
+                setTimeout(() => {
+                    initializeS3();
+                }, 1000);
             } else {
                 console.log("Cognito credentials obtained successfully.");
                 cognitoIdentityId = AWS.config.credentials.identityId;
