@@ -205,10 +205,45 @@ function listFiles() {
             });
         }
         if (data.Contents) {
+            // Step 1: Map existing thumbnails
+            const thumbnailMap = new Map();
             data.Contents.forEach(file => {
                 const fileName = file.Key.replace(getFullS3Path(), '');
-                if (fileName && !fileName.endsWith('/')) {
-                    fileList.innerHTML += createFileItem(fileName, false, file.Size, file.LastModified);
+                // Match both single and double dot formats
+                if (/-thumb\.\.?[a-zA-Z0-9]+$/.test(fileName)) {
+                    // Extract original filename from thumbnail name
+                    // Remove "-thumb." or "-thumb.." and extension, then re-add extension? 
+                    // Easier: regex replace the suffix.
+                    // string: image-thumb.jpg -> image.jpg
+                    // string: image-thumb..jpg -> image.jpg
+
+                    // Regex to find the "-thumb" part before the last dot(s) and extension
+                    // We can just strip "-thumb" if we assume it was inserted before the extension.
+                    // But wait, the extension is at the end.
+                    // A: image.jpg -> thumb: image-thumb.jpg
+                    // B: image.jpg -> thumb: image-thumb..jpg (bugged version)
+
+                    // Reverse logic:
+                    // If ends with -thumb.ext
+                    let original = fileName.replace(/-thumb(\.[^.]+)$/, "$1");
+                    // If ends with -thumb..ext
+                    original = original.replace(/-thumb(\.\.[^.]+)$/, (match, ext) => ext.substring(1)); // ..jpg -> .jpg
+
+                    thumbnailMap.set(original, fileName);
+                }
+            });
+
+            // Step 2: Render files
+            data.Contents.forEach(file => {
+                const fileName = file.Key.replace(getFullS3Path(), '');
+                const isThumbnail = /-thumb\.\.?[a-zA-Z0-9]+$/.test(fileName);
+
+                // console.log(`Processing file: ${fileName}, isThumbnail: ${isThumbnail}`); // DEBUG LOG
+
+                if (fileName && !fileName.endsWith('/') && !isThumbnail) {
+                    // Check if we have a mapped thumbnail
+                    const previewPath = thumbnailMap.get(fileName) || fileName;
+                    fileList.innerHTML += createFileItem(fileName, false, file.Size, file.LastModified, previewPath);
                 }
             });
         }
@@ -225,12 +260,13 @@ function listFiles() {
         // Pre-generate or retrieve signed URLs
         lazyImages.forEach(img => {
             const fileName = img.dataset.src;
+            // Since dataset.src is now the authoritative preview path (thumbnail or original),
+            // we use it directly without guessing.
             const cacheKey = getFullS3Path(fileName);
 
             // Check if we have a valid cached URL (buffer of 5 minutes before actual expiry)
             if (urlCache[cacheKey] && urlCache[cacheKey].expires > now + 300000) {
                 // Use cached URL
-                // We don't need to do anything here as we'll set it in the observer
             } else {
                 // Generate new URL
                 const params = {
@@ -241,7 +277,7 @@ function listFiles() {
                 const url = s3.getSignedUrl('getObject', params);
                 urlCache[cacheKey] = {
                     url: url,
-                    expires: now + (3600 * 1000) // Store expiration time
+                    expires: now + (3600 * 1000)
                 };
             }
         });
@@ -255,6 +291,14 @@ function listFiles() {
 
                     if (urlCache[cacheKey]) {
                         img.src = urlCache[cacheKey].url;
+
+                        img.onerror = () => {
+                            // If authoritative source fails, it's a real error, but we can't easily fallback 
+                            // because we don't know the 'original' here simply. 
+                            // But since we built this map from *existing* files, it shouldn't fail 404.
+                            // However, we can handle signed url expiry or other network errors.
+                            console.warn("Failed to load preview:", fileName);
+                        };
                     }
 
                     img.classList.remove('lazy-image');
@@ -269,7 +313,7 @@ function listFiles() {
         // --- END: Optimized Lazy Loading Logic for Full Quality Previews ---
     });
 }
-function createFileItem(name, isFolder, size) {
+function createFileItem(name, isFolder, size, lastModified, previewPath = name) {
     const safeName = name.replace(/'/g, "\\'");
     const extension = isFolder ? null : name.split('.').pop().toLowerCase();
     const isImage = ['jpg', 'jpeg', 'png', 'gif', 'svg'].includes(extension);
@@ -281,8 +325,8 @@ function createFileItem(name, isFolder, size) {
     let iconOrPreview;
 
     if (isImage) {
-        // ... (lazy image logic remains the same) ...
-        iconOrPreview = `<img class="lazy-image w-16 h-16 object-cover bg-gray-200 rounded-md" data-src="${safeName}" alt="${name}" src="data:image/gif;base64,R0lGODlhAQABAIAAAMLCwgAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==">`;
+        // Use the explicit previewPath (which is either the thumbnail or the original)
+        iconOrPreview = `<img class="lazy-image w-16 h-16 object-cover bg-gray-200 rounded-md" data-src="${previewPath}" alt="${name}" src="data:image/gif;base64,R0lGODlhAQABAIAAAMLCwgAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==">`;
     } else {
         iconOrPreview = getFileIcon(isFolder, name);
     }
@@ -568,7 +612,8 @@ function uploadFile() {
             // If it's an image, generate and upload a thumbnail
             if (isImage) {
                 const thumbnailBlob = await generateThumbnail(file);
-                const thumbName = file.name.replace(/\.[^/.]+$/, "-thumb.$&");
+                // Fix: Removed extra dot in replacement string since '&' includes the dot from the extension
+                const thumbName = file.name.replace(/\.[^/.]+$/, "-thumb$&");
                 const thumbParams = {
                     Bucket: BUCKET_NAME,
                     Key: getFullS3Path(thumbName),
@@ -697,6 +742,29 @@ function deleteSingleObject(fileName) {
     s3.deleteObject(params, (err, data) => {
         if (err) showToast(`Error deleting file: ${err.message}`, true);
         else {
+            // Check if it has a potential thumbnail and try to delete it
+            const extension = fileName.split('.').pop().toLowerCase();
+            const isImage = ['jpg', 'jpeg', 'png', 'gif'].includes(extension);
+
+            if (isImage) {
+                // Try to delete both potential thumbnail formats (single and double dot)
+                const thumbNameCorrect = fileName.replace(/\.[^/.]+$/, "-thumb$&");
+                const thumbNameBugged = fileName.replace(/\.[^/.]+$/, "-thumb.$&");
+
+                [thumbNameCorrect, thumbNameBugged].forEach(thumbKey => {
+                    const thumbParams = {
+                        Bucket: BUCKET_NAME,
+                        Key: getFullS3Path(thumbKey)
+                    };
+                    // Silently attempt to delete thumbnail
+                    s3.deleteObject(thumbParams, (err, data) => {
+                        if (err && err.code !== 'NoSuchKey') {
+                            console.warn("Could not delete associated thumbnail:", err);
+                        }
+                    });
+                });
+            }
+
             showToast(`File '${fileName}' deleted successfully.`);
             listFiles();
         }
