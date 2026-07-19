@@ -17,4 +17,13 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Environment variables
+.env
+.env.local
+.env.*.local
 react-app/.env
+server/.env
+server/.env.example
+PROJECT_BREAKDOWN.md
+react-app/.env.example

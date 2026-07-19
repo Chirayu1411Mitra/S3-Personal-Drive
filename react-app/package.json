@@ -14,7 +14,8 @@
     "jszip": "^3.10.1",
     "lucide-react": "^1.14.0",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "s3-personal-drive": "file:.."
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

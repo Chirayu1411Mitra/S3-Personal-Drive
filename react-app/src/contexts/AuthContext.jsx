@@ -1,6 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react';
 import { onAuthStateChanged, signInWithGoogle as firebaseSignIn, logout as firebaseLogout } from '../services/auth';
-import { initializeS3, resetS3 } from '../services/s3';
 
 const AuthContext = createContext(null);
 
@@ -15,26 +14,11 @@ export function AuthProvider({ children }) {
       if (user) {
         setCurrentUser(user);
         setIsAuthenticated(true);
-        try {
-          await initializeS3(user);
-          setS3Ready(true);
-        } catch (err) {
-          console.error("S3 init failed, retrying:", err);
-          // Retry once
-          setTimeout(async () => {
-            try {
-              await initializeS3(user);
-              setS3Ready(true);
-            } catch (e) {
-              console.error("S3 init retry failed:", e);
-            }
-          }, 1000);
-        }
+        setS3Ready(true);
       } else {
         setCurrentUser(null);
         setIsAuthenticated(false);
         setS3Ready(false);
-        resetS3();
       }
       setIsLoading(false);
     });
