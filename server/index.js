@@ -300,6 +300,13 @@ app.delete('/api/s3/delete-folder', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+
+// Only listen locally (Vercel sets the VERCEL environment variable)
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
+}
+
+// Export the Express API so Vercel can use it
+export default app;
