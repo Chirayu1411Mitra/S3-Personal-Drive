@@ -27,3 +27,4 @@ server/.env
 server/.env.example
 PROJECT_BREAKDOWN.md
 react-app/.env.example
+ISSUES.md

@@ -3,10 +3,28 @@ import { motion } from 'framer-motion';
 import { X, Download } from 'lucide-react';
 import { useDrive } from '../contexts/DriveContext';
 
-export default function ImagePreview({ fileName, onClose }) {
+export default function ImagePreview({ item, onClose }) {
   const { getSignedUrl, handleDownload } = useDrive();
+  const fileName = item.name;
+  // Use displayPath (web-optimized preview) if available, else fall back to original
+  const previewFile = item.displayPath || item.name;
   const [loaded, setLoaded] = useState(false);
-  const url = getSignedUrl(fileName);
+  const [url, setUrl] = useState(null);
+  const [hasError, setHasError] = useState(false);
+  const [retried, setRetried] = useState(false);
+
+  useEffect(() => {
+    let ignore = false;
+    getSignedUrl(previewFile, retried)
+      .then(signedUrl => {
+        if (!ignore) {
+          setUrl(signedUrl);
+          setHasError(false);
+        }
+      })
+      .catch(err => console.error("Failed to load image:", err));
+    return () => { ignore = true; };
+  }, [previewFile, getSignedUrl, retried]);
 
   const handleKeyDown = useCallback((e) => {
     if (e.key === 'Escape') onClose();
@@ -42,16 +60,31 @@ export default function ImagePreview({ fileName, onClose }) {
         </div>
       </div>
       <div className="image-preview-body" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-        {!loaded && <div className="spinner" style={{ width: 40, height: 40, position: 'absolute' }} />}
-        <motion.img
-          src={url}
-          alt={fileName}
-          onLoad={() => setLoaded(true)}
-          initial={{ scale: 0.9, opacity: 0 }}
-          animate={{ scale: loaded ? 1 : 0.9, opacity: loaded ? 1 : 0 }}
-          transition={{ duration: 0.3 }}
-          style={{ display: loaded ? 'block' : 'none' }}
-        />
+        {!loaded && !hasError && <div className="spinner" style={{ width: 40, height: 40, position: 'absolute' }} />}
+        {url && !hasError && (
+          <motion.img
+            src={url}
+            alt={fileName}
+            onLoad={() => setLoaded(true)}
+            onError={() => {
+              if (!retried) {
+                console.log("Image load failed, retrying with fresh URL to bypass cache...");
+                setRetried(true);
+              } else {
+                setHasError(true);
+              }
+            }}
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: loaded ? 1 : 0.9, opacity: loaded ? 1 : 0 }}
+            transition={{ duration: 0.3 }}
+          />
+        )}
+        {hasError && (
+          <div style={{ color: 'white', textAlign: 'center', background: 'rgba(0,0,0,0.5)', padding: '16px 24px', borderRadius: '8px' }}>
+            <p style={{ margin: '0 0 8px 0', fontWeight: 'bold' }}>Image is corrupted or cannot be loaded.</p>
+            <p style={{ margin: 0, fontSize: '0.875rem', opacity: 0.8 }}>Try downloading it directly to verify the original file.</p>
+          </div>
+        )}
       </div>
     </motion.div>
   );

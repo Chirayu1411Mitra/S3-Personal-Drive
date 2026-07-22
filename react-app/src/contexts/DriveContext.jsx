@@ -17,6 +17,7 @@ export function DriveProvider({ children }) {
   const [toasts, setToasts] = useState([]);
   const [storageUsed, setStorageUsed] = useState(0);
   const [dynamicStorageLimit, setDynamicStorageLimit] = useState(DEFAULT_STORAGE_LIMIT);
+  const [viewMode, setViewMode] = useState('list'); // 'list' | 'gallery'
 
   const { currentUser } = useAuth();
 
@@ -227,8 +228,19 @@ export function DriveProvider({ children }) {
     setZipProgress(null);
   }, [selectedItems, currentPath, showToast, handleDownload]);
 
-  const getSignedUrl = useCallback((fileName) => {
-    return s3Service.getSignedUrl(currentPath, fileName);
+  const urlCache = useRef(new Map());
+
+  const getSignedUrl = useCallback(async (fileName, forceRefresh = false) => {
+    const key = `${currentPath}${fileName}`;
+    const cached = urlCache.current.get(key);
+    // Reuse URL if fetched within the last 50 minutes (expires in 60m)
+    if (!forceRefresh && cached && (Date.now() - cached.timestamp < 50 * 60 * 1000)) {
+      return cached.url;
+    }
+    
+    const url = await s3Service.getSignedUrl(currentPath, fileName);
+    urlCache.current.set(key, { url, timestamp: Date.now() });
+    return url;
   }, [currentPath]);
 
   const switchSection = useCallback((section) => {
@@ -243,7 +255,7 @@ export function DriveProvider({ children }) {
     <DriveContext.Provider value={{
       files, folders, currentPath, selectedItems, isLoading,
       activeSection, toasts, uploadProgress, zipProgress, deleteTarget,
-      storageUsed, storageLimit: dynamicStorageLimit,
+      storageUsed, storageLimit: dynamicStorageLimit, viewMode, setViewMode,
       refreshFiles, navigateTo, openFolder,
       toggleSelection, selectAll, deselectAll,
       handleUpload, handleCreateFolder, handleDelete,

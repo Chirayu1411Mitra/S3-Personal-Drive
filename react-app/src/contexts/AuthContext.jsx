@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react';
-import { onAuthStateChanged, signInWithGoogle as firebaseSignIn, logout as firebaseLogout } from '../services/auth';
+import { onAuthStateChanged, signInWithGoogle as firebaseSignIn, logout as firebaseLogout, updateLastLogin } from '../services/auth';
 
 const AuthContext = createContext(null);
 
@@ -15,6 +15,7 @@ export function AuthProvider({ children }) {
         setCurrentUser(user);
         setIsAuthenticated(true);
         setS3Ready(true);
+        updateLastLogin(user.uid, user.email).catch(console.error);
       } else {
         setCurrentUser(null);
         setIsAuthenticated(false);

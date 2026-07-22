@@ -1,11 +1,12 @@
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronRight, Download, Trash2, X } from 'lucide-react';
+import { ChevronRight, Download, Trash2, X, LayoutGrid, List } from 'lucide-react';
 import { useDrive } from '../contexts/DriveContext';
 
 export default function Toolbar({ fileInputRef }) {
   const {
     currentPath, navigateTo, selectedItems, deselectAll,
     handleDownloadSelected, handleDelete, activeSection,
+    viewMode, setViewMode,
   } = useDrive();
 
   const pathParts = currentPath.split('/').filter(Boolean);
@@ -38,6 +39,24 @@ export default function Toolbar({ fileInputRef }) {
               })}
             </>
           )}
+        </div>
+        
+        {/* View Mode Toggle */}
+        <div style={{ display: 'flex', gap: 4, background: 'var(--bg-tertiary)', padding: 4, borderRadius: 'var(--radius-md)' }}>
+          <button 
+            className={`btn-icon ${viewMode === 'list' ? 'active' : ''}`}
+            onClick={() => setViewMode('list')}
+            title="List View"
+          >
+            <List size={18} />
+          </button>
+          <button 
+            className={`btn-icon ${viewMode === 'gallery' ? 'active' : ''}`}
+            onClick={() => setViewMode('gallery')}
+            title="Gallery View"
+          >
+            <LayoutGrid size={18} />
+          </button>
         </div>
       </div>
 

@@ -83,7 +83,7 @@ export default function DrivePage() {
       )}
 
       {imagePreview && (
-        <ImagePreview fileName={imagePreview} onClose={() => setImagePreview(null)} />
+        <ImagePreview item={imagePreview} onClose={() => setImagePreview(null)} />
       )}
 
       {uploadProgress && <UploadModal {...uploadProgress} />}

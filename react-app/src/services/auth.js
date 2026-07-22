@@ -30,13 +30,12 @@ export function onAuthStateChanged(callback) {
   return auth.onAuthStateChanged(callback);
 }
 
-export async function saveIdentityIdToFirestore(userId, identityId, email) {
+export async function updateLastLogin(userId, email) {
   try {
     const userRef = db.collection("users").doc(userId);
     const doc = await userRef.get();
     
     const updateData = {
-      s3_folder_id: identityId,
       email: email,
       lastLogin: firebase.firestore.FieldValue.serverTimestamp()
     };
@@ -48,7 +47,7 @@ export async function saveIdentityIdToFirestore(userId, identityId, email) {
 
     await userRef.set(updateData, { merge: true });
   } catch (error) {
-    console.error("Error saving Identity ID to Firestore:", error);
+    console.error("Error updating last login in Firestore:", error);
     throw error;
   }
 }

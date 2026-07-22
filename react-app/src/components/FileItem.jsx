@@ -39,8 +39,9 @@ function FileThumbnail({ item, getSignedUrl }) {
   useEffect(() => {
     const observer = new IntersectionObserver(([entry]) => {
       if (entry.isIntersecting) {
-        const url = getSignedUrl(item.previewPath || item.name);
-        setSrc(url);
+        getSignedUrl(item.previewPath || item.name)
+          .then(url => setSrc(url))
+          .catch(err => console.error("Thumbnail load error:", err));
         observer.disconnect();
       }
     });
@@ -80,7 +81,7 @@ const FileItem = memo(function FileItem({ item, index, onPreviewImage }) {
     // Ignore clicks on checkbox or menu button
     if (e.target.type === 'checkbox' || e.target.closest('button') || e.target.closest('.context-menu')) return;
     if (item.isFolder) openFolder(item.name);
-    else if (isImage) onPreviewImage(item.name);
+    else if (isImage) onPreviewImage(item);
     else handleView(item.name);
   };
 
@@ -102,7 +103,7 @@ const FileItem = memo(function FileItem({ item, index, onPreviewImage }) {
       </td>
       <td>
         <div className="file-name">
-          {isImage ? <FileThumbnail item={item} getSignedUrl={getSignedUrl} /> : <FileIcon item={item} />}
+          {isImage && item.previewPath ? <FileThumbnail item={item} getSignedUrl={getSignedUrl} /> : <FileIcon item={item} />}
           <span title={item.name}>{item.name}</span>
         </div>
       </td>
@@ -134,7 +135,7 @@ const FileItem = memo(function FileItem({ item, index, onPreviewImage }) {
                   <Download size={14} /> Download
                 </button>
                 {isImage && (
-                  <button onClick={() => { onPreviewImage(item.name); setMenuOpen(false); }}>
+                  <button onClick={() => { onPreviewImage(item); setMenuOpen(false); }}>
                     <Eye size={14} /> Preview
                   </button>
                 )}

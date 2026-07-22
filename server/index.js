@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import AWS from 'aws-sdk';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+import { getFirestore } from 'firebase-admin/firestore';
 
 dotenv.config();
 
@@ -27,6 +28,7 @@ try {
 } catch (error) {
   console.error("Failed to initialize Firebase Admin:", error);
 }
+const db = getFirestore();
 
 // Initialize AWS S3
 AWS.config.update({
@@ -48,6 +50,16 @@ const requireAuth = async (req, res, next) => {
   try {
     const decodedToken = await getAuth().verifyIdToken(idToken);
     req.user = decodedToken;
+
+    try {
+      const userDoc = await db.collection("users").doc(decodedToken.uid).get();
+      if (userDoc.exists) {
+        req.user.s3_folder_id = userDoc.data().s3_folder_id;
+      }
+    } catch (dbErr) {
+      console.error('Error fetching user from Firestore:', dbErr);
+    }
+
     next();
   } catch (error) {
     console.error('Error verifying Firebase token:', error);
@@ -57,15 +69,16 @@ const requireAuth = async (req, res, next) => {
 
 app.use('/api/s3', requireAuth);
 
-const getFullS3Path = (uid, currentPath, key = '') => {
-  return `${uid}/${currentPath || ''}${key}`;
+const getFullS3Path = (user, currentPath, key = '') => {
+  const rootFolder = user.s3_folder_id || user.uid;
+  return `${rootFolder}/${currentPath || ''}${key}`;
 };
 
 // 1. List files and folders
 app.get('/api/s3/list', async (req, res) => {
   try {
     const { path: currentPath = '' } = req.query;
-    const prefix = getFullS3Path(req.user.uid, currentPath);
+    const prefix = getFullS3Path(req.user, currentPath);
 
     const params = {
       Bucket: BUCKET_NAME,
@@ -74,21 +87,30 @@ app.get('/api/s3/list', async (req, res) => {
     };
 
     const data = await s3.listObjectsV2(params).promise();
-    
+    const contents = data.Contents || [];
     const folders = [];
     const files = [];
     const thumbnailMap = new Map();
+    const previewMap = new Map();
+    const variantNames = new Set(); // all -thumb and -preview filenames to exclude from listing
 
-    if (data.Contents) {
-      data.Contents.forEach(file => {
-        const fileName = file.Key.replace(prefix, '');
+    // First pass: collect all variant files
+    contents.forEach(file => {
+      const fileName = file.Key.replace(prefix, '');
+      if (/-thumb\.\.?[a-zA-Z0-9]+$/.test(fileName) || fileName.endsWith('-preview.webp')) {
+        variantNames.add(fileName);
+        if (fileName.endsWith('-preview.webp')) {
+          // e.g. "photo-preview.webp" -> baseName = "photo"
+          const baseName = fileName.replace(/-preview\.webp$/, '');
+          previewMap.set(baseName, fileName);
+        }
         if (/-thumb\.\.?[a-zA-Z0-9]+$/.test(fileName)) {
           let original = fileName.replace(/-thumb(\.[^.]+)$/, "$1");
           original = original.replace(/-thumb(\.\.[^.]+)$/, (match, ext) => ext.substring(1));
           thumbnailMap.set(original, fileName);
         }
-      });
-    }
+      }
+    });
 
     if (data.CommonPrefixes) {
       data.CommonPrefixes.forEach(p => {
@@ -97,23 +119,29 @@ app.get('/api/s3/list', async (req, res) => {
       });
     }
 
-    if (data.Contents) {
-      data.Contents.forEach(file => {
-        const fileName = file.Key.replace(prefix, '');
-        const isThumbnail = /-thumb\.\.?[a-zA-Z0-9]+$/.test(fileName);
-        if (fileName && !fileName.endsWith('/') && !isThumbnail) {
-          const previewPath = thumbnailMap.get(fileName) || fileName;
-          files.push({
-            name: fileName,
-            isFolder: false,
-            size: file.Size,
-            lastModified: file.LastModified,
-            previewPath
-          });
-        }
-      });
-    }
+    // Second pass: build file list, excluding all variants
+    contents.forEach(file => {
+      const fileName = file.Key.replace(prefix, '');
+      if (!fileName || fileName.endsWith('/')) return;
+      // Skip thumbnails and preview files
+      if (fileName.endsWith('-preview.webp')) return;
+      if (/-thumb\./.test(fileName)) return;
 
+      const previewPath = thumbnailMap.get(fileName) || (file.Size < 500 * 1024 ? fileName : null);
+      const fileBaseName = fileName.replace(/\.[^/.]+$/, '');
+      const displayPath = previewMap.get(fileBaseName) || null;
+
+      files.push({
+        name: fileName,
+        isFolder: false,
+        size: file.Size,
+        lastModified: file.LastModified,
+        previewPath,
+        displayPath
+      });
+    });
+
+    res.set('Cache-Control', 'no-store');
     res.json({ folders, files });
   } catch (err) {
     console.error(err);
@@ -125,7 +153,7 @@ app.get('/api/s3/list', async (req, res) => {
 app.get('/api/s3/list-all', async (req, res) => {
   try {
     const { path: currentPath = '' } = req.query;
-    const prefix = getFullS3Path(req.user.uid, currentPath);
+    const prefix = getFullS3Path(req.user, currentPath);
     let allFiles = [];
     let continuationToken;
 
@@ -141,7 +169,8 @@ app.get('/api/s3/list-all', async (req, res) => {
         data.Contents.forEach(file => {
           const fileName = file.Key.replace(prefix, '');
           const isThumbnail = /-thumb\.\.?[a-zA-Z0-9]+$/.test(fileName);
-          if (fileName && !fileName.endsWith('/') && !isThumbnail) {
+          const isPreview = fileName.endsWith('-preview.webp');
+          if (fileName && !fileName.endsWith('/') && !isThumbnail && !isPreview) {
             allFiles.push({
               name: fileName,
               fullKey: file.Key,
@@ -165,7 +194,8 @@ app.get('/api/s3/list-all', async (req, res) => {
 // 3. Get storage usage
 app.get('/api/s3/storage-usage', async (req, res) => {
   try {
-    const prefix = `${req.user.uid}/`;
+    const rootFolder = req.user.s3_folder_id || req.user.uid;
+    const prefix = `${rootFolder}/`;
     let totalBytes = 0;
     let continuationToken;
 
@@ -191,7 +221,7 @@ app.post('/api/s3/presigned-url', async (req, res) => {
     const { action, path = '', fileName, contentType } = req.body;
     if (!action || !fileName) return res.status(400).json({ error: 'Missing action or fileName' });
 
-    const key = getFullS3Path(req.user.uid, path, fileName);
+    const key = getFullS3Path(req.user, path, fileName);
     let params = { Bucket: BUCKET_NAME, Key: key };
     let operation = '';
 
@@ -230,7 +260,7 @@ app.post('/api/s3/folder', async (req, res) => {
     
     const params = {
       Bucket: BUCKET_NAME,
-      Key: getFullS3Path(req.user.uid, path, folderName + '/')
+      Key: getFullS3Path(req.user, path, folderName + '/')
     };
     await s3.putObject(params).promise();
     res.json({ success: true });
@@ -246,17 +276,18 @@ app.delete('/api/s3/delete-file', async (req, res) => {
     const { path = '', fileName } = req.body;
     if (!fileName) return res.status(400).json({ error: 'Missing fileName' });
     
-    await s3.deleteObject({ Bucket: BUCKET_NAME, Key: getFullS3Path(req.user.uid, path, fileName) }).promise();
+    await s3.deleteObject({ Bucket: BUCKET_NAME, Key: getFullS3Path(req.user, path, fileName) }).promise();
     
-    // Also try to delete thumbnails
+    // Also try to delete thumbnail and preview variants
     const extension = fileName.split('.').pop().toLowerCase();
-    const isImage = ['jpg', 'jpeg', 'png', 'gif'].includes(extension);
+    const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(extension);
     if (isImage) {
       const thumbCorrect = fileName.replace(/\.[^/.]+$/, "-thumb$&");
       const thumbBugged = fileName.replace(/\.[^/.]+$/, "-thumb.$&");
-      for (const thumbKey of [thumbCorrect, thumbBugged]) {
+      const previewName = fileName.replace(/\.[^/.]+$/, "-preview.webp");
+      for (const variantKey of [thumbCorrect, thumbBugged, previewName]) {
         try {
-          await s3.deleteObject({ Bucket: BUCKET_NAME, Key: getFullS3Path(req.user.uid, path, thumbKey) }).promise();
+          await s3.deleteObject({ Bucket: BUCKET_NAME, Key: getFullS3Path(req.user, path, variantKey) }).promise();
         } catch (e) { /* ignore */ }
       }
     }
@@ -273,7 +304,7 @@ app.delete('/api/s3/delete-folder', async (req, res) => {
     const { path = '', folderName } = req.body;
     if (!folderName) return res.status(400).json({ error: 'Missing folderName' });
     
-    const prefix = getFullS3Path(req.user.uid, path, folderName + '/');
+    const prefix = getFullS3Path(req.user, path, folderName + '/');
     let continuationToken;
 
     do {

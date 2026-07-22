@@ -83,9 +83,9 @@ export async function uploadFile(currentPath, file, onProgress) {
         const isImage = ['jpg', 'jpeg', 'png', 'gif'].includes(extension);
         if (isImage) {
           try {
-            await uploadThumbnail(currentPath, file, headers);
+            await uploadImageVariants(currentPath, file, headers);
           } catch (e) {
-             console.error("Thumbnail upload failed:", e);
+             console.error("Variant upload failed:", e);
           }
         }
         resolve();
@@ -99,32 +99,44 @@ export async function uploadFile(currentPath, file, onProgress) {
   });
 }
 
-async function uploadThumbnail(currentPath, originalFile, headers) {
-  const thumbnailBlob = await generateThumbnail(originalFile);
+async function uploadImageVariants(currentPath, originalFile, headers) {
+  // 1. Generate and upload thumbnail (200px, keep original format)
+  const thumbnailBlob = await generateImageVariant(originalFile, 200, 0.8, originalFile.type);
   const thumbName = originalFile.name.replace(/\.[^/.]+$/, "-thumb$&");
   
+  // 2. Generate and upload preview (1920px, highly compressed WebP)
+  const previewBlob = await generateImageVariant(originalFile, 1920, 0.8, 'image/webp');
+  const previewName = originalFile.name.replace(/\.[^/.]+$/, "-preview.webp");
+  
+  // Upload both concurrently
+  await Promise.all([
+    uploadBlobToS3(currentPath, thumbName, thumbnailBlob, originalFile.type, headers),
+    uploadBlobToS3(currentPath, previewName, previewBlob, 'image/webp', headers)
+  ]);
+}
+
+async function uploadBlobToS3(currentPath, fileName, blob, contentType, headers) {
   const res = await fetch(`${API_URL}/s3/presigned-url`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ action: 'upload', path: currentPath, fileName: thumbName, contentType: originalFile.type })
+    body: JSON.stringify({ action: 'upload', path: currentPath, fileName, contentType })
   });
-  if (!res.ok) throw new Error('Failed to get thumb upload URL');
+  if (!res.ok) throw new Error(`Failed to get upload URL for ${fileName}`);
   const { url } = await res.json();
   
   await fetch(url, {
     method: 'PUT',
-    headers: { 'Content-Type': originalFile.type },
-    body: thumbnailBlob
+    headers: { 'Content-Type': contentType },
+    body: blob
   });
 }
 
-async function generateThumbnail(file) {
+async function generateImageVariant(file, maxSize, quality = 0.8, type = 'image/webp') {
   return new Promise(resolve => {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     const img = new Image();
     img.onload = () => {
-      const maxSize = 200;
       let { width, height } = img;
       if (width > height) {
         if (width > maxSize) { height = (height * maxSize) / width; width = maxSize; }
@@ -134,7 +146,7 @@ async function generateThumbnail(file) {
       canvas.width = width;
       canvas.height = height;
       ctx.drawImage(img, 0, 0, width, height);
-      canvas.toBlob(resolve, file.type, 0.8);
+      canvas.toBlob(resolve, type, quality);
     };
     img.src = URL.createObjectURL(file);
   });
